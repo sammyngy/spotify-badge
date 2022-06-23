@@ -8,14 +8,23 @@ import {
 	CLIENT_SECRET,
 } from '../consts'
 
-export type TrackInfo = {
+export type PlaybackState = {
 	progress: number
 	duration: number
-	track: string
-	artist: string
 	isPlaying: boolean
-	coverUrl: string
+}
+
+type Track = {
+	name: string
 	url: string
+	album: string
+	artist: string
+	coverUrl: string
+}
+
+type NowPlaying = {
+	state: PlaybackState
+	track: Track | null
 }
 
 export const basic = Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64')
@@ -39,29 +48,50 @@ async function getAccessToken() {
 	return access_token
 }
 
-function formatTrackInfo(trackInfo: SpotifyApi.CurrentlyPlayingResponse): TrackInfo | null {
-	const { progress_ms, item, is_playing: isPlaying = false, currently_playing_type } = trackInfo
-
-	if (item === null || currently_playing_type !== 'track') {
-		return null
+function formatTrack({ name, album, artists, external_urls }: SpotifyApi.TrackObjectFull): Track {
+	return {
+		name,
+		album: album.name,
+		artist: artists.map((a) => a.name).join(', '),
+		coverUrl: album.images[album.images.length - 1]?.url,
+		url: external_urls.spotify,
 	}
-
-	const {
-		duration_ms: duration,
-		name: track,
-		artists = [],
-		album,
-		external_urls,
-	} = item as SpotifyApi.TrackObjectFull
-	const artist = artists.map(({ name }) => name).join(', ')
-	const coverUrl = album.images[album.images.length - 1]?.url
-	const url = external_urls.spotify
-	const progress = progress_ms ?? 0
-
-	return { progress, duration, track, artist, isPlaying, coverUrl, url }
 }
 
-async function getCurrentTrack(): Promise<null | TrackInfo> {
+function formatPlaybackState(data: SpotifyApi.CurrentlyPlayingResponse): PlaybackState {
+	const { progress_ms, is_playing, item } = data
+
+	return {
+		duration: item?.duration_ms ?? 0,
+		progress: progress_ms ?? 0,
+		isPlaying: is_playing,
+	}
+}
+
+function formatNowPlaying(data: SpotifyApi.CurrentlyPlayingResponse): NowPlaying {
+	return {
+		state: formatPlaybackState(data),
+		track:
+			data.item !== null || data.currently_playing_type === 'track'
+				? formatTrack(data.item as SpotifyApi.TrackObjectFull)
+				: null,
+	}
+}
+
+function formatTopTracks({ items }: SpotifyApi.UsersTopTracksResponse): Track[] {
+	return items.slice(0, 10).map(formatTrack)
+}
+
+async function getCoverBase64(url: string) {
+	const res = await fetch(url)
+	const buff = await res.arrayBuffer()
+
+	return Buffer.from(buff).toString('base64')
+}
+
+export async function getNowPlaying(
+	{ coverFormat }: { coverFormat: 'url' | 'base64' } = { coverFormat: 'url' }
+): Promise<NowPlaying | null> {
 	const token = await getAccessToken()
 	const res = await fetch(NOW_PLAYING_ENDPOINT, {
 		headers: {
@@ -75,36 +105,26 @@ async function getCurrentTrack(): Promise<null | TrackInfo> {
 	}
 
 	const data: SpotifyApi.CurrentlyPlayingResponse = await res.json()
+	const nowPlaying = formatNowPlaying(data)
 
-	return formatTrackInfo(data)
-}
+	if (coverFormat === 'base64' && nowPlaying.track !== null) {
+		const coverBase64 = await getCoverBase64(nowPlaying.track.coverUrl)
 
-async function getCoverBase64(url: string) {
-	const res = await fetch(url)
-	const buff = await res.arrayBuffer()
-
-	return Buffer.from(buff).toString('base64')
-}
-
-export async function getNowPlaying(
-	{ coverFormat }: { coverFormat: 'url' | 'base64' } = { coverFormat: 'url' }
-): Promise<TrackInfo | { isPlaying: false }> {
-	const track = await getCurrentTrack()
-
-	if (track === null) {
-		return {
-			isPlaying: false,
-		}
+		nowPlaying.track.coverUrl = `data:image/jpeg;base64,${coverBase64}`
 	}
 
-	if (coverFormat === 'base64') {
-		const coverBase64 = await getCoverBase64(track.coverUrl)
+	return nowPlaying
+}
 
-		return {
-			...track,
-			coverUrl: `data:image/jpeg;base64,${coverBase64}`,
-		}
-	}
+export async function getTopTracks() {
+	const accessToken = await getAccessToken()
+	const res = await fetch('https://api.spotify.com/v1/me/top/tracks', {
+		method: 'GET',
+		headers: {
+			Authorization: `Bearer ${accessToken}`,
+		},
+	})
+	const data: SpotifyApi.UsersTopTracksResponse = await res.json()
 
-	return track
+	return formatTopTracks(data)
 }
